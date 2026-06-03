@@ -32,7 +32,12 @@ jobs:
           node-version-file: package.json
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        # --ignore-scripts skips the dev-only `effect-language-service patch`
+        # prepare hook (which fails on a fresh install: the pinned
+        # @effect/language-service can't patch the resolved TypeScript). It is
+        # not needed to build. The native node-pty binary is compiled later by
+        # the staged `bun install --production` (which has no prepare script).
+        run: bun install --frozen-lockfile --ignore-scripts
 
       - name: Build Windows artifact (unsigned)
         shell: bash
