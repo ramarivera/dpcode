@@ -20,21 +20,29 @@ import {
 
 export const ProviderHealthBanner = memo(function ProviderHealthBanner({
   onDismiss,
+  onRetry,
   status,
 }: {
   onDismiss?: () => void;
+  onRetry?: () => void;
   status: ServerProviderStatus | null;
 }) {
-  if (!status || status.status === "ready") {
+  // Stay quiet while everything is healthy or a probe is still legitimately
+  // running — only an actionable problem (timed out / unavailable / limited)
+  // earns a banner.
+  if (!status || status.status === "ready" || status.status === "checking") {
     return null;
   }
 
   const providerLabel = PROVIDER_DISPLAY_NAMES[status.provider] ?? status.provider;
-  const defaultMessage =
-    status.status === "error"
+  const defaultMessage = status.timedOut
+    ? `${providerLabel} health check timed out.`
+    : status.status === "error"
       ? `${providerLabel} provider is unavailable.`
       : `${providerLabel} provider has limited availability.`;
-  const title = `${providerLabel} provider status`;
+  const title = status.timedOut
+    ? `${providerLabel} health check timed out`
+    : `${providerLabel} provider status`;
   const Icon = status.status === "error" ? CircleAlertIcon : TriangleAlertIcon;
 
   return (
@@ -46,11 +54,19 @@ export const ProviderHealthBanner = memo(function ProviderHealthBanner({
         >
           <Icon className={NOTIFICATION_ICON_CLASS_NAME} />
           <AlertTitle className="font-normal text-white">{title}</AlertTitle>
-          <AlertDescription
-            className="line-clamp-3 text-white/72"
-            title={status.message ?? defaultMessage}
-          >
-            {status.message ?? defaultMessage}
+          <AlertDescription className="text-white/72">
+            <span className="line-clamp-3" title={status.message ?? defaultMessage}>
+              {status.message ?? defaultMessage}
+            </span>
+            {onRetry ? (
+              <button
+                type="button"
+                className="inline-flex w-fit items-center rounded-md bg-white/10 px-2 py-0.5 font-medium text-[11px] text-white/85 uppercase tracking-[0.06em] hover:bg-white/15 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/35"
+                onClick={onRetry}
+              >
+                Retry checks
+              </button>
+            ) : null}
           </AlertDescription>
           {onDismiss ? (
             <AlertAction className="absolute top-2 right-2">

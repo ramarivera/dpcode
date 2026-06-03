@@ -498,7 +498,7 @@ function getProviderStartOptionsCustomBinaryPath(
 }
 
 function getProviderHealthBannerDismissalKey(status: ServerProviderStatus | null): string | null {
-  if (!status || status.status === "ready") {
+  if (!status || status.status === "ready" || status.status === "checking") {
     return null;
   }
   return [
@@ -2737,7 +2737,7 @@ export default function ChatView({
     () => providerStatuses.find((status) => status.provider === "codex") ?? null,
     [providerStatuses],
   );
-  const refreshVoiceStatus = useCallback(() => {
+  const refreshProviderStatuses = useCallback(() => {
     const api = readNativeApi();
     if (!api) return;
     void api.server
@@ -4871,7 +4871,7 @@ export default function ChatView({
           : "The voice note could not be transcribed.";
       const authExpired = isVoiceAuthExpiredMessage(description);
       if (authExpired) {
-        refreshVoiceStatus();
+        refreshProviderStatuses();
       }
       toastManager.add({
         type: "error",
@@ -4883,7 +4883,7 @@ export default function ChatView({
           ? {
               actionProps: {
                 children: "Refresh status",
-                onClick: refreshVoiceStatus,
+                onClick: refreshProviderStatuses,
               },
             }
           : {}),
@@ -4900,7 +4900,7 @@ export default function ChatView({
     appendVoiceTranscriptToComposer,
     cancelVoiceRecording,
     isVoiceRecording,
-    refreshVoiceStatus,
+    refreshProviderStatuses,
     selectedProvider,
     stopVoiceRecording,
     threadId,
@@ -6627,6 +6627,7 @@ export default function ChatView({
       model={selectedModelForPickerWithCustomFallback}
       lockedProvider={lockedProvider}
       providers={providerStatuses}
+      onRetryProviderChecks={refreshProviderStatuses}
       modelOptionsByProvider={modelOptionsByProvider}
       loadingModelProviders={{
         cursor: cursorModelDiscoveryPending,
@@ -8147,6 +8148,7 @@ export default function ChatView({
       <ProviderHealthBanner
         status={visibleActiveProviderStatus}
         onDismiss={dismissActiveProviderHealthBanner}
+        onRetry={refreshProviderStatuses}
       />
       <ThreadErrorBanner error={activeThread.error} onDismiss={dismissActiveThreadError} />
       <RateLimitBanner

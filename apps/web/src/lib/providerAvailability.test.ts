@@ -128,6 +128,11 @@ describe("isProviderUsable", () => {
       true,
     );
   });
+
+  it("blocks providers that are still checking or timed out", () => {
+    expect(isProviderUsable({ ...BASE_STATUS, status: "checking" })).toBe(false);
+    expect(isProviderUsable({ ...BASE_STATUS, timedOut: true })).toBe(false);
+  });
 });
 
 describe("providerUnavailableReason", () => {
@@ -136,5 +141,24 @@ describe("providerUnavailableReason", () => {
       "Gemini is not authenticated yet.",
     );
     expect(providerUnavailableReason(BASE_STATUS)).toBe(BASE_STATUS.message);
+  });
+
+  it("explains the checking and timed-out states", () => {
+    expect(providerUnavailableReason({ ...BASE_STATUS, status: "checking" })).toBe(
+      "Gemini is still being checked…",
+    );
+    // Timed-out reason prefers an explicit message when present.
+    expect(
+      providerUnavailableReason({
+        ...BASE_STATUS,
+        timedOut: true,
+        message: "Gemini health check timed out after 22s. The CLI did not respond.",
+      }),
+    ).toBe("Gemini health check timed out after 22s. The CLI did not respond.");
+    // ...and falls back to generic retry guidance otherwise.
+    const { message: _message, ...withoutMessage } = BASE_STATUS;
+    expect(providerUnavailableReason({ ...withoutMessage, timedOut: true })).toBe(
+      "Gemini health check timed out. Retry to check again.",
+    );
   });
 });

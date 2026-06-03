@@ -33,7 +33,7 @@ export type ServerConfigIssue = typeof ServerConfigIssue.Type;
 
 const ServerConfigIssues = Schema.Array(ServerConfigIssue);
 
-export const ServerProviderStatusState = Schema.Literals(["ready", "warning", "error"]);
+export const ServerProviderStatusState = Schema.Literals(["checking", "ready", "warning", "error"]);
 export type ServerProviderStatusState = typeof ServerProviderStatusState.Type;
 
 export const ServerProviderAuthStatus = Schema.Literals([
@@ -52,6 +52,10 @@ export const ServerProviderStatus = Schema.Struct({
   authLabel: Schema.optional(TrimmedNonEmptyString),
   voiceTranscriptionAvailable: Schema.optional(Schema.Boolean),
   version: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // Set when a health probe exceeded its hard timeout budget instead of
+  // returning a real result. Lets the UI show a recoverable "Timed out · Retry"
+  // affordance rather than a permanent "Checking" spinner.
+  timedOut: Schema.optional(Schema.Boolean),
   checkedAt: IsoDateTime,
   message: Schema.optional(TrimmedNonEmptyString),
   versionAdvisory: Schema.optionalKey(

@@ -16,10 +16,13 @@ import {
   makeCheckCodexProviderStatus,
   makeCheckCursorProviderStatus,
   makeCheckGrokProviderStatus,
+  makeCheckingStatus,
   makeCheckKiloProviderStatus,
   makeCheckOpenCodeProviderStatus,
+  makeTimedOutStatus,
   parseAuthStatusFromOutput,
   parseClaudeAuthStatusFromOutput,
+  probeBudgetFor,
   readCodexConfigModelProvider,
 } from "./ProviderHealth";
 
@@ -1021,5 +1024,29 @@ it.layer(NodeServices.layer)("ProviderHealth", (it) => {
       assert.strictEqual(parsed.status, "warning");
       assert.strictEqual(parsed.authStatus, "unknown");
     });
+  });
+});
+
+describe("probe budgets and placeholder statuses", () => {
+  it("gives Gemini a wider budget than the default provider budget", () => {
+    assert.ok(probeBudgetFor("gemini") > probeBudgetFor("codex"));
+    assert.strictEqual(probeBudgetFor("codex"), probeBudgetFor("opencode"));
+  });
+
+  it("builds a non-usable, non-persistable checking placeholder", () => {
+    const status = makeCheckingStatus("gemini", "2026-04-17T10:00:00.000Z");
+    assert.strictEqual(status.provider, "gemini");
+    assert.strictEqual(status.status, "checking");
+    assert.strictEqual(status.available, false);
+    assert.strictEqual(status.authStatus, "unknown");
+    assert.strictEqual(status.timedOut, undefined);
+  });
+
+  it("builds a recoverable timed-out status that names the budget", () => {
+    const status = makeTimedOutStatus("gemini", "2026-04-17T10:00:00.000Z", 22_000);
+    assert.strictEqual(status.status, "error");
+    assert.strictEqual(status.available, false);
+    assert.strictEqual(status.timedOut, true);
+    assert.ok((status.message ?? "").includes("22s"));
   });
 });

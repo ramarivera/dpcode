@@ -18,7 +18,7 @@ import type {
   ServerProviderStatusState,
   ServerProviderUpdateState,
 } from "@t3tools/contracts";
-import { ServerProviderUpdateError } from "@t3tools/contracts";
+import { PROVIDER_DISPLAY_NAMES, ServerProviderUpdateError } from "@t3tools/contracts";
 import { parseCodexConfigModelProvider } from "@t3tools/shared/codexConfig";
 import { decodeJsonResult } from "@t3tools/shared/schemaJson";
 import { query as claudeQuery, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -99,6 +99,58 @@ const PROVIDERS = [
 
 const UPDATE_OUTPUT_MAX_BYTES = 10_000;
 const UPDATE_TIMEOUT_MS = 5 * 60_000;
+
+// Hard per-provider budget for a full health probe. A probe that exceeds its
+// budget is surfaced as a recoverable "timed out" status instead of silently
+// gating the rest of the batch — no single slow/wedged CLI can keep every
+// provider stuck on "Checking".
+const DEFAULT_PROBE_BUDGET_MS = 10_000;
+// Gemini's capability probe spawns a `gemini --acp` session whose cold start can
+// legitimately take several seconds; give it a wider budget (still well below
+// the probe's own 30s internal backstop).
+const GEMINI_PROBE_BUDGET_MS = 22_000;
+
+const PROBE_BUDGET_MS: Partial<Record<ProviderKind, number>> = {
+  gemini: GEMINI_PROBE_BUDGET_MS,
+};
+
+export function probeBudgetFor(provider: ProviderKind): number {
+  return PROBE_BUDGET_MS[provider] ?? DEFAULT_PROBE_BUDGET_MS;
+}
+
+// Transient placeholder shown while a provider's first probe is still running.
+export function makeCheckingStatus(
+  provider: ProviderKind,
+  checkedAt: string,
+): ServerProviderStatus {
+  return {
+    provider,
+    status: "checking",
+    available: false,
+    authStatus: "unknown",
+    checkedAt,
+  };
+}
+
+// Terminal-for-this-run status when a probe blew past its hard timeout budget.
+export function makeTimedOutStatus(
+  provider: ProviderKind,
+  checkedAt: string,
+  budgetMs: number,
+): ServerProviderStatus {
+  const providerLabel = PROVIDER_DISPLAY_NAMES[provider] ?? provider;
+  return {
+    provider,
+    status: "error",
+    available: false,
+    authStatus: "unknown",
+    timedOut: true,
+    checkedAt,
+    message: `${providerLabel} health check timed out after ${Math.round(
+      budgetMs / 1000,
+    )}s. The CLI did not respond — retry to check again.`,
+  };
+}
 
 function isClaudeNativeCommandPath(commandPath: string): boolean {
   const normalized = normalizeCommandPath(commandPath);
@@ -1617,28 +1669,22 @@ export const checkCursorProviderStatus = makeCheckCursorProviderStatus();
 
 // ── Snapshot helpers ────────────────────────────────────────────────
 
-function providerStatusesEqual(left: ProviderStatuses, right: ProviderStatuses): boolean {
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every((status, index) => {
-    const next = right[index];
-    return (
-      next !== undefined &&
-      status.provider === next.provider &&
-      status.status === next.status &&
-      status.available === next.available &&
-      status.authStatus === next.authStatus &&
-      (status.authType ?? null) === (next.authType ?? null) &&
-      (status.authLabel ?? null) === (next.authLabel ?? null) &&
-      status.voiceTranscriptionAvailable === next.voiceTranscriptionAvailable &&
-      (status.version ?? null) === (next.version ?? null) &&
-      (status.message ?? null) === (next.message ?? null) &&
-      JSON.stringify(status.versionAdvisory ?? null) ===
-        JSON.stringify(next.versionAdvisory ?? null) &&
-      JSON.stringify(status.updateState ?? null) === JSON.stringify(next.updateState ?? null)
-    );
-  });
+function providerStatusEqual(status: ServerProviderStatus, next: ServerProviderStatus): boolean {
+  return (
+    status.provider === next.provider &&
+    status.status === next.status &&
+    status.available === next.available &&
+    status.authStatus === next.authStatus &&
+    (status.authType ?? null) === (next.authType ?? null) &&
+    (status.authLabel ?? null) === (next.authLabel ?? null) &&
+    status.voiceTranscriptionAvailable === next.voiceTranscriptionAvailable &&
+    (status.timedOut ?? false) === (next.timedOut ?? false) &&
+    (status.version ?? null) === (next.version ?? null) &&
+    (status.message ?? null) === (next.message ?? null) &&
+    JSON.stringify(status.versionAdvisory ?? null) ===
+      JSON.stringify(next.versionAdvisory ?? null) &&
+    JSON.stringify(status.updateState ?? null) === JSON.stringify(next.updateState ?? null)
+  );
 }
 
 // ── Layer ───────────────────────────────────────────────────────────
@@ -1803,104 +1849,175 @@ export const ProviderHealthLive = Layer.effect(
       return next;
     });
 
-    const enrichStatuses = Effect.fn("enrichProviderStatuses")(function* (
-      statuses: ReadonlyArray<ServerProviderStatus>,
-    ) {
-      const enriched = yield* Effect.forEach(
-        statuses,
-        (status) =>
-          getProviderMaintenanceCapabilities(status.provider).pipe(
-            Effect.flatMap((capabilities) =>
-              enrichProviderStatusWithVersionAdvisory(status, capabilities),
-            ),
-            Effect.catch(() =>
-              Effect.succeed({
-                ...status,
-                versionAdvisory: {
-                  status: "unknown" as const,
-                  currentVersion: status.version ?? null,
-                  latestVersion: null,
-                  updateCommand: null,
-                  canUpdate: false,
-                  checkedAt: status.checkedAt,
-                  message: null,
-                },
-              }),
-            ),
-          ),
-        { concurrency: "unbounded" },
-      );
-      return yield* Effect.forEach(enriched, applyVolatileProviderState, {
-        concurrency: "unbounded",
-      });
-    });
+    // Run the right CLI/SDK probe for a single provider. Each probe already
+    // bounds its own sub-steps; the caller wraps this in a hard timeout budget.
+    const checkForProvider = (
+      provider: ProviderKind,
+      settings: ServerSettings,
+    ): Effect.Effect<
+      ServerProviderStatus,
+      never,
+      ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
+    > => {
+      switch (provider) {
+        case "codex":
+          return makeCheckCodexProviderStatus(
+            settings.providers.codex.binaryPath,
+            settings.providers.codex.homePath,
+          );
+        case "claudeAgent":
+          return makeCheckClaudeProviderStatus(
+            resolveClaudeSubscription,
+            settings.providers.claudeAgent.binaryPath,
+          );
+        case "cursor":
+          return makeCheckCursorProviderStatus(settings.providers.cursor.binaryPath);
+        case "gemini":
+          return makeCheckGeminiProviderStatus(settings.providers.gemini.binaryPath);
+        case "grok":
+          return makeCheckGrokProviderStatus(settings.providers.grok.binaryPath);
+        case "kilo":
+          return makeCheckKiloProviderStatus(settings.providers.kilo.binaryPath);
+        case "opencode":
+          return makeCheckOpenCodeProviderStatus(settings.providers.opencode.binaryPath);
+        case "pi":
+          return checkPiProviderStatus(
+            settings.providers.pi.agentDir,
+            settings.providers.pi.binaryPath,
+          );
+      }
+    };
 
-    const loadProviderStatuses = serverSettings.getSettings
-      .pipe(
-        Effect.flatMap((settings) =>
-          Effect.all(
-            [
-              makeCheckCodexProviderStatus(
-                settings.providers.codex.binaryPath,
-                settings.providers.codex.homePath,
-              ),
-              makeCheckClaudeProviderStatus(
-                resolveClaudeSubscription,
-                settings.providers.claudeAgent.binaryPath,
-              ),
-              makeCheckCursorProviderStatus(settings.providers.cursor.binaryPath),
-              makeCheckGeminiProviderStatus(settings.providers.gemini.binaryPath),
-              makeCheckGrokProviderStatus(settings.providers.grok.binaryPath),
-              makeCheckKiloProviderStatus(settings.providers.kilo.binaryPath),
-              makeCheckOpenCodeProviderStatus(settings.providers.opencode.binaryPath),
-              checkPiProviderStatus(
-                settings.providers.pi.agentDir,
-                settings.providers.pi.binaryPath,
-              ),
-            ],
-            {
-              concurrency: "unbounded",
-            },
-          ),
+    // Attach the version advisory (and update-state overlay) to a resolved
+    // status. Transient/timed-out statuses skip the maintenance lookup entirely.
+    const enrichOne = (status: ServerProviderStatus): Effect.Effect<ServerProviderStatus> => {
+      if (status.status === "checking" || status.timedOut) {
+        return Effect.succeed(status);
+      }
+      return getProviderMaintenanceCapabilities(status.provider).pipe(
+        Effect.flatMap((capabilities) =>
+          enrichProviderStatusWithVersionAdvisory(status, capabilities),
         ),
-      )
-      .pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.catch(() =>
+          Effect.succeed({
+            ...status,
+            versionAdvisory: {
+              status: "unknown" as const,
+              currentVersion: status.version ?? null,
+              latestVersion: null,
+              updateCommand: null,
+              canUpdate: false,
+              checkedAt: status.checkedAt,
+              message: null,
+            },
+          }),
+        ),
+        Effect.flatMap(applyVolatileProviderState),
+      );
+    };
+
+    // Atomically replace a single provider's slot and publish the full ordered
+    // snapshot when it actually changed. Ref.modify keeps concurrent per-provider
+    // upserts from clobbering each other's slots.
+    const upsertProviderStatus = (status: ServerProviderStatus) =>
+      Effect.gen(function* () {
+        const result = yield* Ref.modify(
+          statusesRef,
+          (current): readonly [{ next: ProviderStatuses; changed: boolean }, ProviderStatuses] => {
+            const existing = current.find((entry) => entry.provider === status.provider);
+            if (existing && providerStatusEqual(existing, status)) {
+              return [{ next: current, changed: false }, current];
+            }
+            const next = orderProviderStatuses([
+              ...current.filter((entry) => entry.provider !== status.provider),
+              status,
+            ]);
+            return [{ next, changed: true }, next];
+          },
+        );
+        if (result.changed) {
+          yield* PubSub.publish(changesPubSub, result.next);
+        }
+        return result;
+      });
+
+    const persistOne = (status: ServerProviderStatus) => {
+      // Never cache transient ("checking") or timed-out states — the cache should
+      // only ever seed real, settled results on the next launch.
+      if (status.status === "checking" || status.timedOut) {
+        return Effect.void;
+      }
+      const { updateState: _updateState, ...statusToPersist } = status;
+      return writeProviderStatusCache({
+        filePath: cachePathByProvider.get(status.provider)!,
+        provider: statusToPersist,
+      }).pipe(
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
-        Effect.map(orderProviderStatuses),
-        Effect.flatMap(enrichStatuses),
+        Effect.tapError(Effect.logError),
+        Effect.ignore,
       );
+    };
 
-    const persistStatuses = (statuses: ProviderStatuses) =>
-      Effect.forEach(
-        statuses,
-        (status) => {
-          const { updateState: _updateState, ...statusToPersist } = status;
-          return writeProviderStatusCache({
-            filePath: cachePathByProvider.get(status.provider)!,
-            provider: statusToPersist,
-          }).pipe(
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-            Effect.provideService(Path.Path, path),
-            Effect.tapError(Effect.logError),
-            Effect.ignore,
-          );
-        },
+    const runOneProviderRefresh = (
+      provider: ProviderKind,
+      settings: ServerSettings,
+      checkedAt: string,
+    ) =>
+      Effect.gen(function* () {
+        const budgetMs = probeBudgetFor(provider);
+        const probe = checkForProvider(provider, settings).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        );
+        const [elapsed, outcome] = yield* Effect.timed(probe.pipe(Effect.timeoutOption(budgetMs)));
+        const timedOut = Option.isNone(outcome);
+        const durationMs = Math.round(Duration.toMillis(elapsed));
+        const rawStatus = Option.getOrElse(outcome, () =>
+          makeTimedOutStatus(provider, checkedAt, budgetMs),
+        );
+        const enriched = yield* enrichOne(rawStatus);
+        yield* (timedOut ? Effect.logWarning : Effect.logInfo)("providerHealthProbe").pipe(
+          Effect.annotateLogs({
+            provider,
+            durationMs: String(durationMs),
+            timedOut: String(timedOut),
+            status: enriched.status,
+            available: String(enriched.available),
+          }),
+        );
+        const result = yield* upsertProviderStatus(enriched);
+        if (result.changed) {
+          yield* persistOne(enriched);
+        }
+        return enriched;
+      });
+
+    const refreshNow = Effect.gen(function* () {
+      const checkedAt = new Date().toISOString();
+      const settings = yield* serverSettings.getSettings;
+
+      // Seed a "checking" placeholder for any provider we have no result for yet,
+      // so a cold start shows an explicit Checking state immediately without
+      // flickering providers that already have a known (cached) status.
+      const current = yield* Ref.get(statusesRef);
+      const known = new Set(current.map((entry) => entry.provider));
+      yield* Effect.forEach(
+        PROVIDERS.filter((provider) => !known.has(provider)),
+        (provider) => upsertProviderStatus(makeCheckingStatus(provider, checkedAt)),
         { concurrency: "unbounded", discard: true },
       );
 
-    const refreshNow = Effect.gen(function* () {
-      const nextStatuses = yield* loadProviderStatuses;
-      const previousStatuses = yield* Ref.get(statusesRef);
-      if (providerStatusesEqual(previousStatuses, nextStatuses)) {
-        yield* Ref.set(statusesRef, nextStatuses);
-        return nextStatuses;
-      }
-      yield* Ref.set(statusesRef, nextStatuses);
-      yield* persistStatuses(nextStatuses);
-      yield* PubSub.publish(changesPubSub, nextStatuses);
-      return nextStatuses;
+      // Probe every provider independently; each result publishes as soon as it
+      // resolves so one slow/wedged probe can never gate the others.
+      yield* Effect.forEach(
+        PROVIDERS,
+        (provider) => runOneProviderRefresh(provider, settings, checkedAt),
+        { concurrency: "unbounded", discard: true },
+      );
+
+      return yield* Ref.get(statusesRef);
     });
 
     // Keep a single refresh in flight so repeated config reads do not spawn

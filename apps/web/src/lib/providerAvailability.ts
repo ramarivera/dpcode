@@ -69,6 +69,12 @@ export function providerUnavailableReason(status: ServerProviderStatus | null | 
     return "Provider status is still loading.";
   }
   const providerLabel = PROVIDER_DISPLAY_NAMES[status.provider] ?? status.provider;
+  if (status.status === "checking") {
+    return `${providerLabel} is still being checked…`;
+  }
+  if (status.timedOut) {
+    return status.message ?? `${providerLabel} health check timed out. Retry to check again.`;
+  }
   if (status.authStatus === "unauthenticated") {
     return `${providerLabel} is not authenticated yet.`;
   }

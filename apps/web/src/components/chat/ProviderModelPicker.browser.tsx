@@ -126,6 +126,7 @@ async function mountPicker(props: {
   providers?: ReadonlyArray<ServerProviderStatus>;
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   onSelectionCommitted?: () => void;
+  onRetryProviderChecks?: () => void;
   modelOptionsByProvider?: Record<
     ProviderKind,
     ReadonlyArray<ProviderModelOption & { slug: ModelSlug }>
@@ -145,6 +146,9 @@ async function mountPicker(props: {
         : {})}
       {...(props.providers ? { providers: props.providers } : {})}
       {...(props.onSelectionCommitted ? { onSelectionCommitted: props.onSelectionCommitted } : {})}
+      {...(props.onRetryProviderChecks
+        ? { onRetryProviderChecks: props.onRetryProviderChecks }
+        : {})}
       onProviderModelChange={onProviderModelChange}
     />,
     { container: host },
@@ -557,6 +561,50 @@ describe("ProviderModelPicker", () => {
         const text = document.body.textContent ?? "";
         expect(text).toContain("Claude");
         expect(text).toContain("Checking");
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("offers a clickable retry on a timed-out provider row", async () => {
+    const onRetryProviderChecks = vi.fn();
+    const mounted = await mountPicker({
+      provider: "codex",
+      model: "gpt-5-codex",
+      lockedProvider: null,
+      onRetryProviderChecks,
+      providers: [
+        {
+          provider: "codex",
+          status: "ready",
+          available: true,
+          authStatus: "authenticated",
+          checkedAt: "2026-04-10T10:00:00.000Z",
+        },
+        {
+          provider: "claudeAgent",
+          status: "error",
+          available: false,
+          authStatus: "unknown",
+          timedOut: true,
+          checkedAt: "2026-04-10T10:00:00.000Z",
+          message: "Claude health check timed out after 10s.",
+        },
+      ],
+    });
+
+    try {
+      await page.getByRole("button").click();
+
+      await vi.waitFor(() => {
+        expect(document.body.textContent ?? "").toContain("Timed out");
+      });
+
+      await page.getByRole("menuitem", { name: /Timed out/ }).click();
+
+      await vi.waitFor(() => {
+        expect(onRetryProviderChecks).toHaveBeenCalled();
       });
     } finally {
       await mounted.cleanup();

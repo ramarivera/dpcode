@@ -152,8 +152,12 @@ export const probeGeminiCapabilities = (input: {
   readonly cwd: string;
   readonly capabilities?: ModelCapabilities;
 }) =>
+  // The injected AbortSignal fires when the surrounding Effect is interrupted
+  // (e.g. by the health-check timeout budget). We use it to kill the spawned
+  // `gemini --acp` child immediately instead of leaking it until the internal
+  // 30s timer fires.
   Effect.tryPromise(
-    () =>
+    (signal) =>
       new Promise<GeminiCapabilityProbeResult>((resolve) => {
         const child = spawn(input.binaryPath, ["--acp"], {
           cwd: input.cwd,
@@ -182,11 +186,13 @@ export const probeGeminiCapabilities = (input: {
         let settled = false;
         let sessionNewRequested = false;
         let timeout: ReturnType<typeof setTimeout> | undefined;
+        let removeAbortListener: (() => void) | undefined;
 
         const cleanup = () => {
           if (timeout) {
             clearTimeout(timeout);
           }
+          removeAbortListener?.();
           stdoutReader.removeAllListeners();
           stderrReader.removeAllListeners();
           child.removeAllListeners();
@@ -272,6 +278,23 @@ export const probeGeminiCapabilities = (input: {
             ),
           });
         }, GEMINI_ACP_PROBE_TIMEOUT_MS);
+
+        const onAbort = () => {
+          finalize({
+            status: "warning",
+            auth: { status: "unknown" },
+            models: [],
+            message: formatGeminiDiscoveryWarning(
+              "Gemini ACP probe was canceled before completing.",
+            ),
+          });
+        };
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () => signal.removeEventListener("abort", onAbort);
 
         stdoutReader.on("line", (line) => {
           pushLogLine(stdoutLines, line);

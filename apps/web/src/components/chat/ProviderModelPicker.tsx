@@ -56,11 +56,23 @@ function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): o
 function resolveLiveProviderAvailability(provider: ServerProviderStatus | undefined): {
   disabled: boolean;
   label: string | null;
+  retry: boolean;
 } {
-  if (!provider) {
+  // Absent status or an in-flight probe both read as "still checking".
+  if (!provider || provider.status === "checking") {
     return {
       disabled: true,
       label: "Checking",
+      retry: false,
+    };
+  }
+
+  // A probe that blew past its timeout budget — recoverable, so offer a retry.
+  if (provider.timedOut) {
+    return {
+      disabled: true,
+      label: "Timed out · Retry",
+      retry: true,
     };
   }
 
@@ -68,6 +80,7 @@ function resolveLiveProviderAvailability(provider: ServerProviderStatus | undefi
     return {
       disabled: true,
       label: provider.authStatus === "unauthenticated" ? "Sign in" : "Unavailable",
+      retry: false,
     };
   }
 
@@ -75,12 +88,14 @@ function resolveLiveProviderAvailability(provider: ServerProviderStatus | undefi
     return {
       disabled: true,
       label: "Sign in",
+      retry: false,
     };
   }
 
   return {
     disabled: false,
     label: null,
+    retry: false,
   };
 }
 
@@ -178,6 +193,8 @@ type ProviderModelMenuItemsProps = {
   model: ModelSlug;
   lockedProvider: ProviderKind | null;
   providers?: ReadonlyArray<ServerProviderStatus>;
+  // Re-run the provider health checks; surfaced on rows whose probe timed out.
+  onRetryProviderChecks?: () => void;
   modelOptionsByProvider: Record<ProviderKind, ReadonlyArray<ProviderModelOption>>;
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
@@ -423,8 +440,16 @@ export const ProviderModelMenuItems = memo(function ProviderModelMenuItems(
         const liveProvider = props.providers?.find((entry) => entry.provider === option.value);
         const availability = resolveLiveProviderAvailability(liveProvider);
         if (availability.disabled) {
+          // A timed-out probe is recoverable: make the row clickable so it can
+          // re-run the checks instead of being a dead "disabled" entry.
+          const canRetry = availability.retry && props.onRetryProviderChecks !== undefined;
           return (
-            <MenuItem key={option.value} disabled>
+            <MenuItem
+              key={option.value}
+              {...(canRetry
+                ? { onClick: () => props.onRetryProviderChecks?.() }
+                : { disabled: true })}
+            >
               <OptionIcon
                 aria-hidden="true"
                 className={cn(
@@ -507,6 +532,7 @@ type ProviderModelPickerProps = {
   model: ModelSlug;
   lockedProvider: ProviderKind | null;
   providers?: ReadonlyArray<ServerProviderStatus>;
+  onRetryProviderChecks?: () => void;
   modelOptionsByProvider: Record<ProviderKind, ReadonlyArray<ProviderModelOption>>;
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
@@ -627,6 +653,9 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(
           model={props.model}
           lockedProvider={props.lockedProvider}
           {...(props.providers ? { providers: props.providers } : {})}
+          {...(props.onRetryProviderChecks
+            ? { onRetryProviderChecks: props.onRetryProviderChecks }
+            : {})}
           modelOptionsByProvider={props.modelOptionsByProvider}
           {...(props.loadingModelProviders
             ? { loadingModelProviders: props.loadingModelProviders }

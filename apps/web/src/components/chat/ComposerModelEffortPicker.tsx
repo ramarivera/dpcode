@@ -57,6 +57,7 @@ type ComposerModelEffortPickerProps = {
   model: ModelSlug;
   lockedProvider: ProviderKind | null;
   providers?: ReadonlyArray<ServerProviderStatus>;
+  onRetryProviderChecks?: () => void;
   modelOptionsByProvider: Record<ProviderKind, ReadonlyArray<ProviderModelOption>>;
   loadingModelProviders?: Partial<Record<ProviderKind, boolean>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
@@ -285,6 +286,9 @@ export const ComposerModelEffortPicker = memo(function ComposerModelEffortPicker
               model={props.model}
               lockedProvider={props.lockedProvider}
               {...(props.providers ? { providers: props.providers } : {})}
+              {...(props.onRetryProviderChecks
+                ? { onRetryProviderChecks: props.onRetryProviderChecks }
+                : {})}
               modelOptionsByProvider={props.modelOptionsByProvider}
               {...(props.loadingModelProviders
                 ? { loadingModelProviders: props.loadingModelProviders }
