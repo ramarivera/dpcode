@@ -1,0 +1,53 @@
+name: Win build check
+
+# Build-only smoke test for the Windows desktop artifact. No release, no tag,
+# no npm publish — just compiles the NSIS installer on a windows-2022 runner and
+# uploads it as a workflow artifact. Lives on the throwaway `winbuild-check`
+# branch so it never lands on a real branch.
+
+on:
+  push:
+    branches: [winbuild-check]
+  workflow_dispatch:
+
+jobs:
+  build-win:
+    name: Build Windows x64 (nsis)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build Windows artifact (unsigned)
+        shell: bash
+        run: bun run dist:desktop:artifact -- --platform win --target nsis --arch x64 --verbose
+
+      - name: List produced artifacts
+        shell: bash
+        run: ls -la release/
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-win-x64
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest*.yml
+          if-no-files-found: error
