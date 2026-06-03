@@ -1,0 +1,49 @@
+# mise.toml — toolchain + build tasks for Synara, with first-class support for
+# building the Windows desktop installer on a Windows machine.
+#
+# Why this exists:
+#   * The desktop build scripts are TypeScript executed via `node` (so Node must
+#     be new enough to strip types — the repo pins engines.node ^24.13.1).
+#   * electron-builder recompiles the native `node-pty` module, which needs a
+#     REAL Python (not the Windows Store alias stub) plus the Visual Studio
+#     "Desktop development with C++" workload (provides cl.exe / MSVC).
+#
+# mise pins Node/Bun and provisions a real Python so node-gyp works. The MSVC
+# C++ workload must already be installed via the Visual Studio Installer — run
+# `mise run win:doctor` to check it.
+#
+# Usage on Windows, from the repo root:
+#   mise install
+#   mise run win:doctor        # sanity-check node/bun/python/MSVC
+#   bun install --frozen-lockfile
+#   mise run build:win         # -> release\Synara-<version>-x64.exe
+
+[tools]
+node = "24"
+bun = "1.3.12"
+python = "3.12"
+
+[env]
+# Pin the MSVC toolchain version node-gyp / electron-rebuild target on Windows.
+GYP_MSVS_VERSION = "2022"
+npm_config_msvs_version = "2022"
+
+[tasks."install"]
+description = "Install workspace dependencies (frozen lockfile)"
+run = "bun install --frozen-lockfile"
+
+[tasks."build:desktop"]
+description = "Build the shared desktop/server/web bundles (no packaging)"
+run = "bun run build:desktop"
+
+[tasks."build:win"]
+description = "Build the Windows NSIS desktop installer (x64, unsigned)"
+run = "bun run dist:desktop:artifact -- --platform win --target nsis --arch x64 --verbose"
+
+[tasks."build:mac-arm"]
+description = "Build the macOS arm64 DMG"
+run = "bun run dist:desktop:artifact -- --platform mac --target dmg --arch arm64 --verbose"
+
+[tasks."win:doctor"]
+description = "Print the active build toolchain (node/bun/python) for Windows builds"
+run = "node --version && bun --version && python --version"
