@@ -1,3 +1,43 @@
+# Toolchain + build tasks for Synara.
+#
+# `python` is provisioned here so node-gyp / electron-rebuild can recompile the
+# native `node-pty` module when packaging the Windows desktop installer (the
+# Windows Store python alias stub does not work). The MSVC "Desktop development
+# with C++" workload must already be installed via the Visual Studio Installer —
+# run `mise run win:doctor` to sanity-check the toolchain.
+#
+# Windows build, from the repo root:
+#   mise install
+#   mise run win:doctor
+#   bun install --frozen-lockfile
+#   mise run build:win        # -> release\Synara-<version>-x64.exe
+
 [tools]
 node = "24.13.1"
 bun = "1.3.9"
+python = "3.12"
+
+[env]
+# Pin the MSVC toolchain version node-gyp / electron-rebuild target on Windows.
+GYP_MSVS_VERSION = "2022"
+npm_config_msvs_version = "2022"
+
+[tasks."install"]
+description = "Install workspace dependencies (frozen lockfile)"
+run = "bun install --frozen-lockfile"
+
+[tasks."build:desktop"]
+description = "Build the shared desktop/server/web bundles (no packaging)"
+run = "bun run build:desktop"
+
+[tasks."build:win"]
+description = "Build the Windows NSIS desktop installer (x64, unsigned)"
+run = "bun run dist:desktop:artifact -- --platform win --target nsis --arch x64 --verbose"
+
+[tasks."build:mac-arm"]
+description = "Build the macOS arm64 DMG"
+run = "bun run dist:desktop:artifact -- --platform mac --target dmg --arch arm64 --verbose"
+
+[tasks."win:doctor"]
+description = "Print the active build toolchain (node/bun/python) for Windows builds"
+run = "node --version && bun --version && python --version"
